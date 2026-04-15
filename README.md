@@ -44,6 +44,20 @@ Use `--align-mode linear` when different runs log at slightly different steps an
 Use `--smooth-method ema` for exponential moving average smoothing.
 Use `--smooth-window` to control the rolling window or EMA span after alignment.
 
+### W&B Smoothing ↔ EMA Span
+
+`--smooth-window` sets the pandas `ewm(span=...)`. The conversion to W&B's smoothing weight is `w = (span − 1) / (span + 1)`.
+
+| W&B weight | `--smooth-window` (span) |
+|------------|--------------------------|
+| 0.8        | 9                        |
+| 0.9        | 19                       |
+| 0.95       | 39                       |
+| 0.96       | 49                       |
+| 0.97       | 66                       |
+| 0.98       | 99                       |
+| 0.99       | 199                      |
+
 ## Outputs
 
 - `*.pdf` and `*.png`: final figure
