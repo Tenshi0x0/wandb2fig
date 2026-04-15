@@ -21,16 +21,26 @@ This installs the core plotting stack plus `SciencePlots`.
 
 ```bash
 python plot_wandb_runs.py \
-  --entity OpenMLRL \
-  --project multi-source-gathering-tianle \
-  --series 'baseline::^dt-baseline_msg_108_4B4B4B_singlegpu$' \
-  --series 'meta::^dt-meta_msg_108_4B4B4B_singlegpu$' \
-  --metric 'eval/answer_score' \
-  --error-band ci95 \
-  --ylabel 'Validation Answer Score' \
-  --title 'HybridQA Multi-Source 108' \
-  --out-prefix figures/hybridqa_108_eval_answer_score
+  --entity [entity] \
+  --project [project] \
+  --series '[label_1]::[run_name_regex_1]' \
+  --series '[label_2]::[run_name_regex_2]' \
+  --series-runs '[label_3]::[run_id_or_url_1],[run_id_or_url_2]' \
+  --metric '[metric]' \
+  --style [science|softgrid|fallback] \
+  --align-mode [exact|linear] \
+  --error-band [std|ci95] \
+  --smooth-window [0|5|9|...] \
+  --ylabel '[y_label]' \
+  --title '[figure_title]' \
+  --out-prefix fig/[name]/[name]
 ```
+
+This layout keeps every figure bundle under its own directory, for example `fig/[name]/[name].pdf` and `fig/[name]/[name].final.csv`.
+Use `--style softgrid` for a softer RL-curve look similar to the screenshot style you shared.
+Use `--series-runs` when you want to specify exact W&B run ids or full run URLs instead of matching by run name regex.
+Use `--align-mode linear` when different runs log at slightly different steps and you still want a visible aggregate band.
+Use `--smooth-window` to smooth the aggregated curve after alignment.
 
 ## Outputs
 
@@ -44,4 +54,3 @@ python plot_wandb_runs.py \
 
 - If a run does not expose a real `seed` in W&B config, the script falls back to a run identifier and warns you.
 - Check `*.runs.csv` before reporting seed-based statistics in the paper.
-- The current example output lives under [figures](/u/tchen19/wandb2fig/figures).

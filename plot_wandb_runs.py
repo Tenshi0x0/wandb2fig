@@ -22,6 +22,25 @@ class SeriesSpec:
     pattern: re.Pattern[str]
 
 
+@dataclass(frozen=True)
+class SeriesRunSpec:
+    label: str
+    run_ids: frozenset[str]
+
+
+@dataclass(frozen=True)
+class StyleProfile:
+    palette: Sequence[str]
+    line_width: float
+    band_alpha: float
+    title_fontfamily: str
+    title_fontsize: float
+    title_fontweight: str
+    legend_facecolor: str
+    legend_edgecolor: str
+    legend_framealpha: float
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Pull curves from Weights & Biases, aggregate across seeds/runs, and make paper-style plots."
@@ -31,16 +50,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--series",
         action="append",
-        required=True,
+        default=None,
         help='Series spec in the form "label::regex", matched against run.name. Repeat for multiple methods.',
+    )
+    parser.add_argument(
+        "--series-runs",
+        action="append",
+        default=None,
+        help='Series spec in the form "label::run_ref_1,run_ref_2", where each ref is a run id or full W&B run URL.',
     )
     parser.add_argument("--metric", required=True, help='Metric key, e.g. "eval/answer_score"')
     parser.add_argument("--step-key", default="_step", help='Step key, default "_step"')
+    parser.add_argument(
+        "--align-mode",
+        choices=("exact", "linear"),
+        default="linear",
+        help="How to align multiple runs before aggregation. 'linear' interpolates onto a shared step grid.",
+    )
     parser.add_argument(
         "--error-band",
         choices=("std", "ci95"),
         default="ci95",
         help="Uncertainty band to draw around the mean.",
+    )
+    parser.add_argument(
+        "--smooth-window",
+        type=int,
+        default=0,
+        help="Centered rolling window for smoothing aggregated curves. Use 0 to disable.",
     )
     parser.add_argument(
         "--seed-key",
@@ -76,16 +113,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--style",
-        choices=("science", "fallback"),
+        choices=("science", "softgrid", "fallback"),
         default="science",
-        help="Plot style preset. 'science' tries SciencePlots first and falls back automatically.",
+        help="Plot style preset. Use 'softgrid' for a screenshot-like RL curve aesthetic.",
     )
     parser.add_argument(
         "--out-prefix",
         required=True,
-        help="Output path prefix, e.g. figures/msg_108_eval_answer_score",
+        help="Output path prefix, e.g. fig/my_plot/my_plot",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.series and not args.series_runs:
+        parser.error("At least one of --series or --series-runs must be provided.")
+    return args
 
 
 def parse_series_specs(values: Sequence[str]) -> List[SeriesSpec]:
@@ -102,6 +142,28 @@ def parse_series_specs(values: Sequence[str]) -> List[SeriesSpec]:
     return specs
 
 
+def extract_run_id(value: str) -> str:
+    value = value.strip()
+    match = re.search(r"/runs/([^/?#]+)", value)
+    if match:
+        return match.group(1)
+    return value
+
+
+def parse_series_run_specs(values: Sequence[str]) -> List[SeriesRunSpec]:
+    specs: List[SeriesRunSpec] = []
+    for value in values:
+        if "::" not in value:
+            raise ValueError(f'Invalid --series-runs value "{value}". Expected "label::run1,run2".')
+        label, raw_refs = value.split("::", 1)
+        label = label.strip()
+        refs = [extract_run_id(ref) for ref in raw_refs.split(",") if ref.strip()]
+        if not label or not refs:
+            raise ValueError(f'Invalid --series-runs value "{value}". Label and run refs must be non-empty.')
+        specs.append(SeriesRunSpec(label=label, run_ids=frozenset(refs)))
+    return specs
+
+
 def parse_figsize(value: str) -> Tuple[float, float]:
     parts = [part.strip() for part in value.split(",")]
     if len(parts) != 2:
@@ -113,7 +175,7 @@ def parse_csv_list(value: str) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def setup_plot_style(style: str) -> None:
+def setup_plot_style(style: str) -> StyleProfile:
     used_scienceplots = False
     if style == "science":
         try:
@@ -127,6 +189,46 @@ def setup_plot_style(style: str) -> None:
                 "Install with `pip install SciencePlots` for the intended paper look.",
                 stacklevel=2,
             )
+    elif style == "softgrid":
+        plt.style.use("seaborn-v0_8-darkgrid")
+        mpl.rcParams.update(
+            {
+                "figure.facecolor": "white",
+                "axes.facecolor": "#ececf4",
+                "axes.grid": True,
+                "axes.axisbelow": True,
+                "grid.color": "#ffffff",
+                "grid.alpha": 0.9,
+                "grid.linestyle": "-",
+                "grid.linewidth": 1.0,
+                "axes.spines.top": False,
+                "axes.spines.right": False,
+                "axes.spines.left": False,
+                "axes.spines.bottom": False,
+                "axes.labelsize": 11,
+                "xtick.labelsize": 11,
+                "ytick.labelsize": 11,
+                "xtick.major.size": 0.0,
+                "ytick.major.size": 0.0,
+                "legend.frameon": True,
+                "legend.fancybox": False,
+                "savefig.bbox": "tight",
+                "savefig.pad_inches": 0.03,
+                "pdf.fonttype": 42,
+                "ps.fonttype": 42,
+            }
+        )
+        return StyleProfile(
+            palette=("#2ca02c", "#ff7f0e", "#e377c2", "#1f77b4", "#8c564b", "#9467bd", "#d62728"),
+            line_width=1.45,
+            band_alpha=0.24,
+            title_fontfamily="DejaVu Serif",
+            title_fontsize=18,
+            title_fontweight="normal",
+            legend_facecolor="#e8e8f0",
+            legend_edgecolor="#c7c9d3",
+            legend_framealpha=0.88,
+        )
 
     if not used_scienceplots:
         plt.style.use("default")
@@ -141,7 +243,6 @@ def setup_plot_style(style: str) -> None:
             "grid.linewidth": 0.5,
             "axes.spines.top": False,
             "axes.spines.right": False,
-            "axes.titleweight": "bold",
             "axes.labelsize": 10,
             "axes.titlesize": 11,
             "xtick.labelsize": 9,
@@ -156,6 +257,17 @@ def setup_plot_style(style: str) -> None:
             "pdf.fonttype": 42,
             "ps.fonttype": 42,
         }
+    )
+    return StyleProfile(
+        palette=tuple(plt.get_cmap("tab10").colors),
+        line_width=2.0,
+        band_alpha=0.18,
+        title_fontfamily="DejaVu Serif",
+        title_fontsize=14,
+        title_fontweight="bold",
+        legend_facecolor="white",
+        legend_edgecolor="#cccccc",
+        legend_framealpha=0.95,
     )
 
 
@@ -194,13 +306,20 @@ def find_config_value(config: Dict[str, Any], target_key: str) -> Any:
     return None
 
 
-def choose_series(run_name: str, specs: Sequence[SeriesSpec]) -> Optional[str]:
-    matches = [spec.label for spec in specs if spec.pattern.search(run_name)]
+def choose_series(
+    run_name: str,
+    run_id: str,
+    regex_specs: Sequence[SeriesSpec],
+    run_specs: Sequence[SeriesRunSpec],
+) -> Optional[str]:
+    matches = [spec.label for spec in run_specs if run_id in spec.run_ids]
+    matches.extend(spec.label for spec in regex_specs if spec.pattern.search(run_name))
     if not matches:
         return None
-    if len(matches) > 1:
-        raise ValueError(f'Run "{run_name}" matches multiple series: {matches}')
-    return matches[0]
+    unique_matches = list(dict.fromkeys(matches))
+    if len(unique_matches) > 1:
+        raise ValueError(f'Run "{run_name}" ({run_id}) matches multiple series: {unique_matches}')
+    return unique_matches[0]
 
 
 def recover_seed(
@@ -243,7 +362,8 @@ def build_dataframes(
     api: wandb.Api,
     entity: str,
     project: str,
-    series_specs: Sequence[SeriesSpec],
+    regex_specs: Sequence[SeriesSpec],
+    run_specs: Sequence[SeriesRunSpec],
     metric: str,
     step_key: str,
     states: Sequence[str],
@@ -252,7 +372,7 @@ def build_dataframes(
     seed_fallback: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     project_path = f"{entity}/{project}"
-    series_order = [spec.label for spec in series_specs]
+    series_order = [spec.label for spec in run_specs] + [spec.label for spec in regex_specs]
     normalized_states = {state.strip().lower() for state in states if state.strip() and state.strip() != "*"}
     runs = list(api.runs(project_path, per_page=max_runs))
     selected_runs: List[Dict[str, Any]] = []
@@ -261,10 +381,11 @@ def build_dataframes(
 
     for run in runs:
         run_name = getattr(run, "name", "") or ""
+        run_id = str(run.id)
         run_state = str(getattr(run, "state", "") or "").strip().lower()
         if normalized_states and run_state not in normalized_states:
             continue
-        series_label = choose_series(run_name, series_specs)
+        series_label = choose_series(run_name, run_id, regex_specs, run_specs)
         if series_label is None:
             continue
 
@@ -272,7 +393,7 @@ def build_dataframes(
         fallback_counts[series_label] = fallback_counts.get(series_label, 0) + 1
         seed, seed_source = recover_seed(
             config=config,
-            run_id=str(run.id),
+            run_id=run_id,
             fallback_mode=seed_fallback,
             fallback_index=fallback_counts[series_label],
             seed_key=seed_key,
@@ -281,7 +402,7 @@ def build_dataframes(
         selected_runs.append(
             {
                 "series": series_label,
-                "run_id": str(run.id),
+                "run_id": run_id,
                 "run_name": run_name,
                 "state": run_state,
                 "created_at": getattr(run, "created_at", None),
@@ -296,7 +417,7 @@ def build_dataframes(
             raw_rows.append(
                 {
                     "series": series_label,
-                    "run_id": str(run.id),
+                    "run_id": run_id,
                     "run_name": run_name,
                     "seed": seed,
                     "seed_source": seed_source,
@@ -324,28 +445,83 @@ def build_dataframes(
     return runs_df, raw_df
 
 
-def aggregate_curves(raw_df: pd.DataFrame, metric: str, step_key: str, error_band: str) -> pd.DataFrame:
+def smooth_series(group_df: pd.DataFrame, smooth_window: int) -> pd.DataFrame:
+    if smooth_window <= 1:
+        return group_df
+
+    smoothed = group_df.copy()
+    for column in ("mean", "band"):
+        smoothed[column] = (
+            smoothed[column]
+            .rolling(window=smooth_window, min_periods=1, center=True)
+            .mean()
+        )
+    smoothed["lower"] = smoothed["mean"] - smoothed["band"]
+    smoothed["upper"] = smoothed["mean"] + smoothed["band"]
+    return smoothed
+
+
+def aggregate_series_exact(series_df: pd.DataFrame, metric: str, step_key: str) -> pd.DataFrame:
     grouped = (
-        raw_df.groupby(["series", step_key], as_index=False, observed=True)
+        series_df.groupby(step_key, as_index=False, observed=True)
         .agg(
             mean=(metric, "mean"),
             std=(metric, "std"),
             n=(metric, "count"),
         )
-        .sort_values(["series", step_key])
+        .sort_values(step_key)
     )
-
-    grouped["std"] = grouped["std"].fillna(0.0)
-    if error_band == "std":
-        grouped["band"] = grouped["std"]
-    else:
-        grouped["band"] = grouped.apply(
-            lambda row: 0.0 if row["n"] <= 1 else 1.96 * row["std"] / math.sqrt(row["n"]),
-            axis=1,
-        )
-    grouped["lower"] = grouped["mean"] - grouped["band"]
-    grouped["upper"] = grouped["mean"] + grouped["band"]
     return grouped
+
+
+def aggregate_series_linear(series_df: pd.DataFrame, metric: str, step_key: str) -> pd.DataFrame:
+    wide = (
+        series_df.pivot_table(index=step_key, columns="run_id", values=metric, aggfunc="last")
+        .sort_index()
+    )
+    wide = wide.interpolate(method="index", axis=0, limit_area="inside")
+    grouped = pd.DataFrame(
+        {
+            step_key: wide.index.to_numpy(),
+            "mean": wide.mean(axis=1, skipna=True).to_numpy(),
+            "std": wide.std(axis=1, skipna=True, ddof=1).to_numpy(),
+            "n": wide.count(axis=1).to_numpy(),
+        }
+    )
+    grouped = grouped.dropna(subset=["mean"]).sort_values(step_key)
+    return grouped
+
+
+def aggregate_curves(
+    raw_df: pd.DataFrame,
+    metric: str,
+    step_key: str,
+    error_band: str,
+    align_mode: str,
+    smooth_window: int,
+) -> pd.DataFrame:
+    grouped_frames: List[pd.DataFrame] = []
+    for series, series_df in raw_df.groupby("series", sort=False, observed=True):
+        if align_mode == "linear":
+            grouped = aggregate_series_linear(series_df=series_df, metric=metric, step_key=step_key)
+        else:
+            grouped = aggregate_series_exact(series_df=series_df, metric=metric, step_key=step_key)
+
+        grouped["series"] = series
+        grouped["std"] = grouped["std"].fillna(0.0)
+        if error_band == "std":
+            grouped["band"] = grouped["std"]
+        else:
+            grouped["band"] = grouped.apply(
+                lambda row: 0.0 if row["n"] <= 1 else 1.96 * row["std"] / math.sqrt(row["n"]),
+                axis=1,
+            )
+        grouped["lower"] = grouped["mean"] - grouped["band"]
+        grouped["upper"] = grouped["mean"] + grouped["band"]
+        grouped = smooth_series(group_df=grouped, smooth_window=smooth_window)
+        grouped_frames.append(grouped)
+
+    return pd.concat(grouped_frames, ignore_index=True).sort_values(["series", step_key])
 
 
 def summarize_final_points(raw_df: pd.DataFrame, metric: str, step_key: str) -> pd.DataFrame:
@@ -378,6 +554,7 @@ def summarize_final_points(raw_df: pd.DataFrame, metric: str, step_key: str) -> 
 def plot_curves(
     agg_df: pd.DataFrame,
     runs_df: pd.DataFrame,
+    style_profile: StyleProfile,
     metric: str,
     step_key: str,
     title: Optional[str],
@@ -387,7 +564,7 @@ def plot_curves(
     figsize: Tuple[float, float],
 ) -> plt.Figure:
     fig, ax = plt.subplots(figsize=figsize)
-    color_cycle = plt.get_cmap("tab10").colors
+    color_cycle = style_profile.palette
     n_runs_map = runs_df.groupby("series", observed=True)["run_id"].nunique().to_dict()
 
     for idx, (series, group_df) in enumerate(agg_df.groupby("series", sort=False, observed=True)):
@@ -398,15 +575,30 @@ def plot_curves(
         lower = group_df["lower"].to_numpy()
         upper = group_df["upper"].to_numpy()
 
-        markevery = max(1, len(group_df) // 8) if len(group_df) > 0 else 1
-        ax.plot(x, y, label=f"{series} (n={n_runs_map.get(series, 0)})", color=color, marker="o", ms=3, markevery=markevery)
-        ax.fill_between(x, lower, upper, color=color, alpha=0.18, linewidth=0)
+        ax.plot(
+            x,
+            y,
+            label=f"{series} (n={n_runs_map.get(series, 0)})",
+            color=color,
+            linewidth=style_profile.line_width,
+        )
+        ax.fill_between(x, lower, upper, color=color, alpha=style_profile.band_alpha, linewidth=0)
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel or metric)
     if title:
-        ax.set_title(title)
-    ax.legend(loc=legend_loc)
+        ax.set_title(
+            title,
+            fontfamily=style_profile.title_fontfamily,
+            fontsize=style_profile.title_fontsize,
+            fontweight=style_profile.title_fontweight,
+            pad=10,
+        )
+    legend = ax.legend(loc=legend_loc)
+    if legend is not None:
+        legend.get_frame().set_facecolor(style_profile.legend_facecolor)
+        legend.get_frame().set_edgecolor(style_profile.legend_edgecolor)
+        legend.get_frame().set_alpha(style_profile.legend_framealpha)
     ax.margins(x=0.02)
     return fig
 
@@ -444,19 +636,21 @@ def print_final_summary(final_df: pd.DataFrame) -> None:
 
 def main() -> int:
     args = parse_args()
-    series_specs = parse_series_specs(args.series)
+    regex_specs = parse_series_specs(args.series or [])
+    run_specs = parse_series_run_specs(args.series_runs or [])
     figsize = parse_figsize(args.figsize)
     formats = parse_csv_list(args.formats)
     states = parse_csv_list(args.states)
 
-    setup_plot_style(args.style)
+    style_profile = setup_plot_style(args.style)
 
     api = wandb.Api(timeout=60)
     runs_df, raw_df = build_dataframes(
         api=api,
         entity=args.entity,
         project=args.project,
-        series_specs=series_specs,
+        regex_specs=regex_specs,
+        run_specs=run_specs,
         metric=args.metric,
         step_key=args.step_key,
         states=states,
@@ -474,12 +668,20 @@ def main() -> int:
             stacklevel=2,
         )
 
-    agg_df = aggregate_curves(raw_df=raw_df, metric=args.metric, step_key=args.step_key, error_band=args.error_band)
+    agg_df = aggregate_curves(
+        raw_df=raw_df,
+        metric=args.metric,
+        step_key=args.step_key,
+        error_band=args.error_band,
+        align_mode=args.align_mode,
+        smooth_window=args.smooth_window,
+    )
     final_df = summarize_final_points(raw_df=raw_df, metric=args.metric, step_key=args.step_key)
 
     fig = plot_curves(
         agg_df=agg_df,
         runs_df=runs_df,
+        style_profile=style_profile,
         metric=args.metric,
         step_key=args.step_key,
         title=args.title,
