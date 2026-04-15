@@ -77,7 +77,13 @@ def parse_args() -> argparse.Namespace:
         "--smooth-window",
         type=int,
         default=0,
-        help="Centered rolling window for smoothing aggregated curves. Use 0 to disable.",
+        help="Smoothing strength. For rolling: window size. For EMA: span. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--smooth-method",
+        choices=("rolling", "ema"),
+        default="rolling",
+        help="Smoothing algorithm applied to aggregated curves.",
     )
     parser.add_argument(
         "--seed-key",
@@ -445,17 +451,20 @@ def build_dataframes(
     return runs_df, raw_df
 
 
-def smooth_series(group_df: pd.DataFrame, smooth_window: int) -> pd.DataFrame:
+def smooth_series(group_df: pd.DataFrame, smooth_window: int, smooth_method: str) -> pd.DataFrame:
     if smooth_window <= 1:
         return group_df
 
     smoothed = group_df.copy()
     for column in ("mean", "band"):
-        smoothed[column] = (
-            smoothed[column]
-            .rolling(window=smooth_window, min_periods=1, center=True)
-            .mean()
-        )
+        if smooth_method == "ema":
+            smoothed[column] = smoothed[column].ewm(span=smooth_window, adjust=False, min_periods=1).mean()
+        else:
+            smoothed[column] = (
+                smoothed[column]
+                .rolling(window=smooth_window, min_periods=1, center=True)
+                .mean()
+            )
     smoothed["lower"] = smoothed["mean"] - smoothed["band"]
     smoothed["upper"] = smoothed["mean"] + smoothed["band"]
     return smoothed
@@ -499,6 +508,7 @@ def aggregate_curves(
     error_band: str,
     align_mode: str,
     smooth_window: int,
+    smooth_method: str,
 ) -> pd.DataFrame:
     grouped_frames: List[pd.DataFrame] = []
     for series, series_df in raw_df.groupby("series", sort=False, observed=True):
@@ -518,7 +528,7 @@ def aggregate_curves(
             )
         grouped["lower"] = grouped["mean"] - grouped["band"]
         grouped["upper"] = grouped["mean"] + grouped["band"]
-        grouped = smooth_series(group_df=grouped, smooth_window=smooth_window)
+        grouped = smooth_series(group_df=grouped, smooth_window=smooth_window, smooth_method=smooth_method)
         grouped_frames.append(grouped)
 
     return pd.concat(grouped_frames, ignore_index=True).sort_values(["series", step_key])
@@ -675,6 +685,7 @@ def main() -> int:
         error_band=args.error_band,
         align_mode=args.align_mode,
         smooth_window=args.smooth_window,
+        smooth_method=args.smooth_method,
     )
     final_df = summarize_final_points(raw_df=raw_df, metric=args.metric, step_key=args.step_key)
 

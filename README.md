@@ -30,6 +30,7 @@ python plot_wandb_runs.py \
   --style [science|softgrid|fallback] \
   --align-mode [exact|linear] \
   --error-band [std|ci95] \
+  --smooth-method [rolling|ema] \
   --smooth-window [0|5|9|...] \
   --ylabel '[y_label]' \
   --title '[figure_title]' \
@@ -40,7 +41,8 @@ This layout keeps every figure bundle under its own directory, for example `fig/
 Use `--style softgrid` for a softer RL-curve look similar to the screenshot style you shared.
 Use `--series-runs` when you want to specify exact W&B run ids or full run URLs instead of matching by run name regex.
 Use `--align-mode linear` when different runs log at slightly different steps and you still want a visible aggregate band.
-Use `--smooth-window` to smooth the aggregated curve after alignment.
+Use `--smooth-method ema` for exponential moving average smoothing.
+Use `--smooth-window` to control the rolling window or EMA span after alignment.
 
 ## Outputs
 
