@@ -105,7 +105,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--title", default=None, help="Optional plot title.")
     parser.add_argument("--xlabel", default="Training Step", help="X-axis label.")
     parser.add_argument("--ylabel", default=None, help="Y-axis label. Defaults to metric name.")
-    parser.add_argument("--legend-loc", default="best", help="Matplotlib legend location.")
+    parser.add_argument("--legend-loc", default="lower right", help="Matplotlib legend location.")
     parser.add_argument(
         "--figsize",
         default="3.6,2.6",
@@ -229,7 +229,7 @@ def setup_plot_style(style: str) -> StyleProfile:
             line_width=1.45,
             band_alpha=0.24,
             title_fontfamily="DejaVu Serif",
-            title_fontsize=18,
+            title_fontsize=16,
             title_fontweight="normal",
             legend_facecolor="#e8e8f0",
             legend_edgecolor="#c7c9d3",
@@ -269,7 +269,7 @@ def setup_plot_style(style: str) -> StyleProfile:
         line_width=2.0,
         band_alpha=0.18,
         title_fontfamily="DejaVu Serif",
-        title_fontsize=14,
+        title_fontsize=13,
         title_fontweight="bold",
         legend_facecolor="white",
         legend_edgecolor="#cccccc",
@@ -575,7 +575,6 @@ def plot_curves(
 ) -> plt.Figure:
     fig, ax = plt.subplots(figsize=figsize)
     color_cycle = style_profile.palette
-    n_runs_map = runs_df.groupby("series", observed=True)["run_id"].nunique().to_dict()
 
     for idx, (series, group_df) in enumerate(agg_df.groupby("series", sort=False, observed=True)):
         color = color_cycle[idx % len(color_cycle)]
@@ -588,7 +587,7 @@ def plot_curves(
         ax.plot(
             x,
             y,
-            label=f"{series} (n={n_runs_map.get(series, 0)})",
+            label=f"{series}",
             color=color,
             linewidth=style_profile.line_width,
         )
