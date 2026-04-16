@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import wandb
 
@@ -65,7 +66,25 @@ def parse_args() -> argparse.Namespace:
         "--align-mode",
         choices=("exact", "linear"),
         default="linear",
-        help="How to align multiple runs before aggregation. 'linear' interpolates onto a shared step grid.",
+        help="How to align multiple runs before aggregation. 'linear' smooths each run first and resamples onto a dense shared grid.",
+    )
+    parser.add_argument(
+        "--clip-to-shortest-series",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Clip all plotted series to the smallest final step among series. Default: enabled.",
+    )
+    parser.add_argument(
+        "--resample-points",
+        type=int,
+        default=400,
+        help="Number of points in the dense shared grid used by --align-mode linear. Default: 400",
+    )
+    parser.add_argument(
+        "--linear-support",
+        choices=("overlap", "truncate-aware", "union"),
+        default="overlap",
+        help="For --align-mode linear, aggregate over only the shared overlap or handle truncated runs by keeping the longer available tail and letting n drop after shorter runs end. Preferred: truncate-aware.",
     )
     parser.add_argument(
         "--error-band",
@@ -82,8 +101,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--smooth-method",
         choices=("rolling", "ema"),
-        default="rolling",
-        help="Smoothing algorithm applied to aggregated curves.",
+        default="ema",
+        help="Smoothing algorithm applied to each run before aggregation.",
     )
     parser.add_argument(
         "--seed-key",
@@ -451,22 +470,24 @@ def build_dataframes(
     return runs_df, raw_df
 
 
-def smooth_series(group_df: pd.DataFrame, smooth_window: int, smooth_method: str) -> pd.DataFrame:
+def smooth_run_history(
+    run_df: pd.DataFrame,
+    metric: str,
+    smooth_window: int,
+    smooth_method: str,
+) -> pd.DataFrame:
     if smooth_window <= 1:
-        return group_df
+        return run_df
 
-    smoothed = group_df.copy()
-    for column in ("mean", "band"):
-        if smooth_method == "ema":
-            smoothed[column] = smoothed[column].ewm(span=smooth_window, adjust=False, min_periods=1).mean()
-        else:
-            smoothed[column] = (
-                smoothed[column]
-                .rolling(window=smooth_window, min_periods=1, center=True)
-                .mean()
-            )
-    smoothed["lower"] = smoothed["mean"] - smoothed["band"]
-    smoothed["upper"] = smoothed["mean"] + smoothed["band"]
+    smoothed = run_df.copy()
+    if smooth_method == "ema":
+        smoothed[metric] = smoothed[metric].ewm(span=smooth_window, adjust=False, min_periods=1).mean()
+    else:
+        smoothed[metric] = (
+            smoothed[metric]
+            .rolling(window=smooth_window, min_periods=1, center=True)
+            .mean()
+        )
     return smoothed
 
 
@@ -483,22 +504,79 @@ def aggregate_series_exact(series_df: pd.DataFrame, metric: str, step_key: str) 
     return grouped
 
 
-def aggregate_series_linear(series_df: pd.DataFrame, metric: str, step_key: str) -> pd.DataFrame:
-    wide = (
-        series_df.pivot_table(index=step_key, columns="run_id", values=metric, aggfunc="last")
-        .sort_index()
+def build_shared_grid(
+    series_df: pd.DataFrame,
+    step_key: str,
+    resample_points: int,
+    linear_support: str,
+) -> np.ndarray:
+    run_ranges = (
+        series_df.groupby("run_id", observed=True)[step_key]
+        .agg(["min", "max"])
+        .reset_index(drop=True)
     )
-    wide = wide.interpolate(method="index", axis=0, limit_area="inside")
+    if linear_support != "overlap":
+        common_min = float(run_ranges["min"].min())
+        common_max = float(run_ranges["max"].max())
+    else:
+        common_min = float(run_ranges["min"].max())
+        common_max = float(run_ranges["max"].min())
+    if common_max < common_min:
+        raise RuntimeError("Runs within a series do not share an overlapping step range.")
+    if common_max == common_min or resample_points <= 1:
+        return np.array([common_min], dtype=float)
+    return np.linspace(common_min, common_max, num=resample_points, dtype=float)
+
+
+def aggregate_series_linear(
+    series_df: pd.DataFrame,
+    metric: str,
+    step_key: str,
+    resample_points: int,
+    linear_support: str,
+) -> pd.DataFrame:
+    shared_grid = build_shared_grid(
+        series_df=series_df,
+        step_key=step_key,
+        resample_points=resample_points,
+        linear_support=linear_support,
+    )
+    resampled_runs: List[np.ndarray] = []
+    for _, run_df in series_df.groupby("run_id", sort=False, observed=True):
+        run_df = run_df.sort_values(step_key)
+        x = run_df[step_key].to_numpy(dtype=float)
+        y = run_df[metric].to_numpy(dtype=float)
+        if x.size == 1:
+            if linear_support != "overlap":
+                filled = np.full(shared_grid.shape, np.nan, dtype=float)
+                filled[np.isclose(shared_grid, x[0])] = y[0]
+                resampled_runs.append(filled)
+            else:
+                resampled_runs.append(np.full(shared_grid.shape, y[0], dtype=float))
+            continue
+        if linear_support != "overlap":
+            filled = np.full(shared_grid.shape, np.nan, dtype=float)
+            support_mask = (shared_grid >= x[0]) & (shared_grid <= x[-1])
+            filled[support_mask] = np.interp(shared_grid[support_mask], x, y)
+            resampled_runs.append(filled)
+        else:
+            resampled_runs.append(np.interp(shared_grid, x, y))
+
+    stacked = np.vstack(resampled_runs)
+    counts = np.sum(~np.isnan(stacked), axis=0)
+    std_values = np.zeros(shared_grid.shape, dtype=float)
+    valid_mask = counts > 1
+    if np.any(valid_mask):
+        std_values[valid_mask] = np.nanstd(stacked[:, valid_mask], axis=0, ddof=1)
     grouped = pd.DataFrame(
         {
-            step_key: wide.index.to_numpy(),
-            "mean": wide.mean(axis=1, skipna=True).to_numpy(),
-            "std": wide.std(axis=1, skipna=True, ddof=1).to_numpy(),
-            "n": wide.count(axis=1).to_numpy(),
+            step_key: shared_grid,
+            "mean": np.nanmean(stacked, axis=0),
+            "std": std_values,
+            "n": counts.astype(int),
         }
     )
-    grouped = grouped.dropna(subset=["mean"]).sort_values(step_key)
-    return grouped
+    return grouped.dropna(subset=["mean"]).sort_values(step_key)
 
 
 def aggregate_curves(
@@ -509,11 +587,31 @@ def aggregate_curves(
     align_mode: str,
     smooth_window: int,
     smooth_method: str,
+    resample_points: int,
+    linear_support: str,
 ) -> pd.DataFrame:
+    smoothed_runs: List[pd.DataFrame] = []
+    for _, run_df in raw_df.groupby(["series", "run_id"], sort=False, observed=True):
+        smoothed_runs.append(
+            smooth_run_history(
+                run_df=run_df.sort_values(step_key),
+                metric=metric,
+                smooth_window=smooth_window,
+                smooth_method=smooth_method,
+            )
+        )
+    processed_df = pd.concat(smoothed_runs, ignore_index=True).sort_values(["series", "run_id", step_key])
+
     grouped_frames: List[pd.DataFrame] = []
-    for series, series_df in raw_df.groupby("series", sort=False, observed=True):
+    for series, series_df in processed_df.groupby("series", sort=False, observed=True):
         if align_mode == "linear":
-            grouped = aggregate_series_linear(series_df=series_df, metric=metric, step_key=step_key)
+            grouped = aggregate_series_linear(
+                series_df=series_df,
+                metric=metric,
+                step_key=step_key,
+                resample_points=resample_points,
+                linear_support=linear_support,
+            )
         else:
             grouped = aggregate_series_exact(series_df=series_df, metric=metric, step_key=step_key)
 
@@ -528,10 +626,17 @@ def aggregate_curves(
             )
         grouped["lower"] = grouped["mean"] - grouped["band"]
         grouped["upper"] = grouped["mean"] + grouped["band"]
-        grouped = smooth_series(group_df=grouped, smooth_window=smooth_window, smooth_method=smooth_method)
         grouped_frames.append(grouped)
 
     return pd.concat(grouped_frames, ignore_index=True).sort_values(["series", step_key])
+
+
+def clip_agg_to_shortest_series(agg_df: pd.DataFrame, step_key: str) -> pd.DataFrame:
+    if agg_df.empty:
+        return agg_df
+    series_max = agg_df.groupby("series", observed=True)[step_key].max()
+    common_max_step = series_max.min()
+    return agg_df[agg_df[step_key] <= common_max_step].copy()
 
 
 def summarize_final_points(raw_df: pd.DataFrame, metric: str, step_key: str) -> pd.DataFrame:
@@ -685,7 +790,11 @@ def main() -> int:
         align_mode=args.align_mode,
         smooth_window=args.smooth_window,
         smooth_method=args.smooth_method,
+        resample_points=args.resample_points,
+        linear_support=args.linear_support,
     )
+    if args.clip_to_shortest_series:
+        agg_df = clip_agg_to_shortest_series(agg_df=agg_df, step_key=args.step_key)
     final_df = summarize_final_points(raw_df=raw_df, metric=args.metric, step_key=args.step_key)
 
     fig = plot_curves(
