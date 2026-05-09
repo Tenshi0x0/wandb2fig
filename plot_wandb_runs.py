@@ -122,6 +122,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-runs", type=int, default=500, help="Maximum runs to scan from the project.")
     parser.add_argument("--title", default=None, help="Optional plot title.")
+    parser.add_argument("--xtick-step", type=float, default=None, help="X-axis major tick step (e.g. 500).")
+    parser.add_argument("--ytick-step", type=float, default=None, help="Y-axis major tick step (e.g. 2).")
+    parser.add_argument("--colors", default=None, help="Comma-separated colors applied in series order (e.g. 'red,blue' or '#d62728,#1f77b4'). Overrides style palette.")
+    parser.add_argument("--xtick-as-k", action="store_true", help="Format x-axis ticks as '1k', '2k', etc. (kilo notation) for large values.")
     parser.add_argument("--xlabel", default="Training Step", help="X-axis label.")
     parser.add_argument("--ylabel", default=None, help="Y-axis label. Defaults to metric name.")
     parser.add_argument("--legend-loc", default="lower right", help="Matplotlib legend location.")
@@ -677,9 +681,13 @@ def plot_curves(
     ylabel: Optional[str],
     legend_loc: str,
     figsize: Tuple[float, float],
+    xtick_step: Optional[float] = None,
+    ytick_step: Optional[float] = None,
+    colors_override: Optional[Sequence[str]] = None,
+    xtick_as_k: bool = False,
 ) -> plt.Figure:
     fig, ax = plt.subplots(figsize=figsize)
-    color_cycle = style_profile.palette
+    color_cycle = colors_override if colors_override else style_profile.palette
 
     for idx, (series, group_df) in enumerate(agg_df.groupby("series", sort=False, observed=True)):
         color = color_cycle[idx % len(color_cycle)]
@@ -714,6 +722,19 @@ def plot_curves(
         legend.get_frame().set_edgecolor(style_profile.legend_edgecolor)
         legend.get_frame().set_alpha(style_profile.legend_framealpha)
     ax.margins(x=0.02)
+    if xtick_step is not None:
+        ax.xaxis.set_major_locator(mpl.ticker.MultipleLocator(xtick_step))
+    if ytick_step is not None:
+        ax.yaxis.set_major_locator(mpl.ticker.MultipleLocator(ytick_step))
+    if xtick_as_k:
+        def _k_fmt(x, _pos):
+            if x == 0:
+                return "0"
+            if abs(x) >= 1000:
+                v = x / 1000
+                return f"{int(v)}k" if v == int(v) else f"{v:g}k"
+            return f"{int(x)}" if x == int(x) else f"{x:g}"
+        ax.xaxis.set_major_formatter(mpl.ticker.FuncFormatter(_k_fmt))
     return fig
 
 
@@ -808,6 +829,10 @@ def main() -> int:
         ylabel=args.ylabel,
         legend_loc=args.legend_loc,
         figsize=figsize,
+        xtick_step=args.xtick_step,
+        ytick_step=args.ytick_step,
+        colors_override=parse_csv_list(args.colors) if args.colors else None,
+        xtick_as_k=args.xtick_as_k,
     )
     out_prefix = Path(args.out_prefix)
     save_outputs(
