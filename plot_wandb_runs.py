@@ -538,13 +538,15 @@ def aggregate_series_linear(
     step_key: str,
     resample_points: int,
     linear_support: str,
+    shared_grid: Optional[np.ndarray] = None,
 ) -> pd.DataFrame:
-    shared_grid = build_shared_grid(
-        series_df=series_df,
-        step_key=step_key,
-        resample_points=resample_points,
-        linear_support=linear_support,
-    )
+    if shared_grid is None:
+        shared_grid = build_shared_grid(
+            series_df=series_df,
+            step_key=step_key,
+            resample_points=resample_points,
+            linear_support=linear_support,
+        )
     resampled_runs: List[np.ndarray] = []
     for _, run_df in series_df.groupby("run_id", sort=False, observed=True):
         run_df = run_df.sort_values(step_key)
@@ -606,6 +608,15 @@ def aggregate_curves(
         )
     processed_df = pd.concat(smoothed_runs, ignore_index=True).sort_values(["series", "run_id", step_key])
 
+    shared_grid: Optional[np.ndarray] = None
+    if align_mode == "linear":
+        shared_grid = build_shared_grid(
+            series_df=processed_df,
+            step_key=step_key,
+            resample_points=resample_points,
+            linear_support=linear_support,
+        )
+
     grouped_frames: List[pd.DataFrame] = []
     for series, series_df in processed_df.groupby("series", sort=False, observed=True):
         if align_mode == "linear":
@@ -615,6 +626,7 @@ def aggregate_curves(
                 step_key=step_key,
                 resample_points=resample_points,
                 linear_support=linear_support,
+                shared_grid=shared_grid,
             )
         else:
             grouped = aggregate_series_exact(series_df=series_df, metric=metric, step_key=step_key)

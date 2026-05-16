@@ -34,6 +34,10 @@ python plot_wandb_runs.py \
   --error-band [std|ci95] \
   --smooth-method [ema|rolling] \
   --smooth-window [0|5|9|...] \
+  --colors '[c1,c2,...]' \
+  --xtick-step [int] \
+  --ytick-step [float] \
+  --xtick-as-k \
   --ylabel '[y_label]' \
   --title '[figure_title]' \
   --out-prefix fig/[name]/[name]
@@ -61,6 +65,46 @@ By default, plotted series are clipped to the shortest finished curve. Pass `--n
 | 0.97       | 66                       |
 | 0.98       | 99                       |
 | 0.99       | 199                      |
+
+## Paper figure recipe
+
+The configuration below was validated for a recent paper submission. It is the recommended starting point for two-method training-curve comparisons with small `n` (around 5 seeds per method).
+
+```bash
+python plot_wandb_runs.py \
+  --entity [entity] \
+  --project [project] \
+  --series 'Method A::^a' \
+  --series 'Method B::^b' \
+  --metric '[metric]' \
+  --style softgrid \
+  --align-mode linear \
+  --resample-points 80 \
+  --error-band std \
+  --smooth-window 0 \
+  --colors '#d62728,#1f77b4' \
+  --ylabel 'Return' \
+  --xtick-step [task-specific] \
+  --ytick-step [task-specific] \
+  --xtick-as-k \
+  --out-prefix fig/[name]/[name]
+```
+
+Key choices and why:
+
+- **No smoothing (`--smooth-window 0`).** EMA-smoothed tails undershoot the real final values reported in `*.final.csv`. EMA also phase-shifts runs against each other, which inflates cross-run std — so the unsmoothed bands are actually *narrower* than smoothed ones. Pure raw curves match the numerical summary best.
+- **`--error-band std`, not `ci95`.** At `n ≈ 5`, the `ci95` factor (`std × 2.776 / √n ≈ std × 1.24`) makes bands wider than `std` and the gap between methods harder to see. `std` is tight and self-explanatory in the caption.
+- **No `--title`.** The figure title belongs in the paper caption, not on the figure.
+- **`--colors '#d62728,#1f77b4'` (Tableau red + blue).** Pure `red,blue` is too saturated for a paper page; muted seaborn-deep tones (`#c44e52,#4c72b0`) are too washed out under print. Tableau is the middle ground.
+- **`--xtick-as-k`.** Once x-axis values cross 1000, three trailing zeros crowd the labels at any reasonable tick density. Kilo notation (`1k`, `1.5k`, `7k`) keeps labels readable without changing the tick positions.
+- **`--xtick-step` and `--ytick-step` per task.** Pick steps that give 5–8 visible labels across the axis range. As a rule of thumb: use `xtick-step` ≈ (max step) / 6, and `ytick-step` ≈ (y range) / 6, rounded to a clean number.
+- **`--resample-points 80`.** Lower than the default 400, on purpose. Without smoothing, 80 keeps the curve shape readable while still showing real variation; 400 looks noisy.
+
+Outputs:
+
+- `*.pdf` is the camera-ready figure; `*.png` is for slides and quick previews.
+- `*.runs.csv` lists the exact W&B runs used — sanity-check this before reporting seed-based statistics, since runs without a real seed in config fall back to `run_id`.
+- `*.final.csv` has the final-point `mean / std / n / ci95` per series, ready to drop into a paper table.
 
 ## Outputs
 
